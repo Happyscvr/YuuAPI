@@ -7,5 +7,5 @@ registerStart(start);
 function start() {
   inWorldConsole.visible(true, new Vector3(0, 1.5, -1.5));
 
-  console.log('Hello World!');
+  console.log('Happyscvr is in the House!!');
 }
