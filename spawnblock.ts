@@ -1,12 +1,30 @@
 // =============================================================
-//  Yuu Online — Grabbable Block (DIAGNOSTIC VERSION)
+//  Yuu Online — Grabbable Block (grab • carry • drop) 🧊
+//  + IN-WORLD CONSOLE turned ON so you can see the logs.
 // =============================================================
-//  This version tests whether hand positions are already in
-//  world-space or local-space by logging the values.
+//  IMPORTANT THING WE JUST LEARNED:
+//    `console.log(...)` only shows up if the in-world console is
+//    VISIBLE. You turn it on once with:
+//        inWorldConsole.visible(true, position, rotation);
+//    That's why the diagnostic logs never appeared before — the
+//    console panel simply wasn't switched on. It's now enabled in
+//    start() below, floating to your left, and shows the last ~20
+//    messages with timestamps.
+//
+//  WHAT THIS DOES:
+//    • Spawns a red cube in front of you.
+//    • GRIP near it to grab with either hand.
+//    • While you hold GRIP the cube follows your hand; let go to drop.
+//    • Logs hand / player / cube positions ~once per second WHILE you
+//      carry, so we can finally SEE whether it keeps up when you
+//      glide/teleport around (locomotion) versus just hand movement.
 // =============================================================
 
+
+// ---- 1. IMPORTS -------------------------------------------------
 import { registerStart } from "./Yuu API/RegisterStart";
 import { spawnPrimitive } from "./Yuu API/SpawnPrimitive";
+import { inWorldConsole } from "./Yuu API/Console";
 import { Entity } from "./Yuu API/Entity";
 import { Controller } from "./Yuu API/Controller";
 import { Player } from "./Yuu API/Player";
@@ -14,17 +32,30 @@ import { Vector3 } from "./Yuu API/Basic Types/Vector3";
 import { Quaternion } from "./Yuu API/Basic Types/Quaternion";
 import { Color } from "./Yuu API/Basic Types/Color";
 
-const GRAB_RANGE = 0.30;
-const SPAWN_POSITION = new Vector3(0, 1.2, -0.8);
-const CUBE_SIZE = new Vector3(0.3, 0.3, 0.3);
 
+// ---- 2. SETTINGS YOU CAN TWEAK ---------------------------------
+const GRAB_RANGE = 0.30;                              // how close to grab (m)
+const SPAWN_POSITION = new Vector3(0, 1.2, -0.8);    // where the cube appears
+const CUBE_SIZE = new Vector3(0.3, 0.3, 0.3);        // 30 cm cube
+
+// Where the in-world console panel floats (to your left, chest height).
+const CONSOLE_POSITION = new Vector3(-1.2, 1.5, -1.0);
+
+
+// ---- 3. SHARED MEMORY ------------------------------------------
 let block: Entity | undefined;
 let heldByHand: "left" | "right" | undefined;
 let frameCount = 0;
 
+
+// ---- 4. registerStart: the on-switch ---------------------------
 registerStart(start);
 
 function start() {
+  // --- Turn the in-world console ON so console.log is visible. ---
+  inWorldConsole.visible(true, CONSOLE_POSITION, Quaternion.one);
+
+  // --- Spawn the cube. ---
   block = spawnPrimitive.cube(
     SPAWN_POSITION,
     CUBE_SIZE,
@@ -36,8 +67,8 @@ function start() {
     undefined
   );
 
-  console.log("🧊 DIAGNOSTIC MODE: Block spawned at", SPAWN_POSITION);
-  console.log("📍 Try grabbing and moving around - watch the console!");
+  console.log("Console is ON. Block spawned.");
+  console.log("Squeeze GRIP near the cube to grab it.");
 
   Controller.subscribe("leftGrip",  "Update",   () => onGripHeld("left"));
   Controller.subscribe("leftGrip",  "Released", () => onGripReleased("left"));
@@ -45,58 +76,60 @@ function start() {
   Controller.subscribe("rightGrip", "Released", () => onGripReleased("right"));
 }
 
+
+// ---- 5. GRABBING + CARRYING ------------------------------------
 function onGripHeld(hand: "left" | "right") {
   if (!block) return;
 
-  const handPos = hand === "left" 
+  const handPos = hand === "left"
     ? Player.leftHand.position.get()
     : Player.rightHand.position.get();
-  
   const handRot = hand === "left"
     ? Player.leftHand.rotation.get()
     : Player.rightHand.rotation.get();
-
   if (!handPos || !handRot) return;
 
-  // Try to grab
+  // STEP A — try to grab if the cube is free.
   if (heldByHand === undefined) {
     const distance = block.pos.distanceTo(handPos);
     if (distance < GRAB_RANGE) {
       heldByHand = hand;
       block.collidable.set(false);
-      
-      const playerPos = Player.position.get();
-      console.log("✅ GRABBED!");
-      console.log("  Hand pos:", handPos.x.toFixed(2), handPos.y.toFixed(2), handPos.z.toFixed(2));
-      console.log("  Player pos:", playerPos?.x.toFixed(2), playerPos?.y.toFixed(2), playerPos?.z.toFixed(2));
-      console.log("  Cube pos:", block.pos.x.toFixed(2), block.pos.y.toFixed(2), block.pos.z.toFixed(2));
+      frameCount = 0;
+      const p = Player.position.get();
+      console.log("GRABBED (" + hand + ")");
+      console.log("hand " + fmt(handPos) + " player " + fmt(p) + " cube " + fmt(block.pos));
     }
   }
 
-  // Carry - SIMPLE version (assume hand positions are already world-space)
+  // STEP B — carry: cube follows the live hand position.
   if (heldByHand === hand) {
-    // Log every 30 frames (~once per second at 30fps)
-    frameCount++;
-    if (frameCount % 30 === 0) {
-      const playerPos = Player.position.get();
-      console.log("📦 CARRYING (frame " + frameCount + "):");
-      console.log("  Hand:", handPos.x.toFixed(2), handPos.y.toFixed(2), handPos.z.toFixed(2));
-      console.log("  Player:", playerPos?.x.toFixed(2), playerPos?.y.toFixed(2), playerPos?.z.toFixed(2));
-      console.log("  Cube:", block.pos.x.toFixed(2), block.pos.y.toFixed(2), block.pos.z.toFixed(2));
-    }
-
-    // Simple approach: just set cube to hand position
     block.pos = handPos;
     block.rot = handRot;
+
+    // Log ~once per second so we can read it while carrying.
+    frameCount++;
+    if (frameCount % 30 === 0) {
+      const p = Player.position.get();
+      console.log("CARRY hand " + fmt(handPos) + " player " + fmt(p));
+    }
   }
 }
 
+
+// ---- 6. DROPPING -----------------------------------------------
 function onGripReleased(hand: "left" | "right") {
   if (!block) return;
-
   if (heldByHand === hand) {
     heldByHand = undefined;
     block.collidable.set(true);
-    console.log("⬇️ DROPPED at", block.pos.x.toFixed(2), block.pos.y.toFixed(2), block.pos.z.toFixed(2));
+    console.log("DROPPED at " + fmt(block.pos));
   }
+}
+
+
+// ---- 7. small helper to print a Vector3 compactly --------------
+function fmt(v: Vector3 | undefined): string {
+  if (!v) return "(?)";
+  return "(" + v.x.toFixed(2) + ", " + v.y.toFixed(2) + ", " + v.z.toFixed(2) + ")";
 }
