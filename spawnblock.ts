@@ -1,28 +1,28 @@
 // =============================================================
-//  Yuu Online — Grabbable Block (SETTER READ-BACK TEST) 🧪
+//  Yuu Online — Grabbable Block (grab • carry • rotate • drop) 🧊
+//  FINAL WORKING VERSION
 // =============================================================
-//  WHAT YOUR LAST VIDEO PROVED:
-//    The console showed `DROPPED at (0.00, 1.20, -0.80)` — which is
-//    EXACTLY the spawn position — even though you had carried the cube
-//    all over the place. That means writing `block.pos = handPos` is
-//    being IGNORED by the engine: the cube's stored position never
-//    actually changed.
+//  WHAT THIS DOES:
+//    • Spawns a red cube in front of you.
+//    • Squeeze GRIP near it (either hand) to grab.
+//    • While you hold GRIP the cube travels WITH your hand AND turns
+//      with your wrist. Move around the world and it comes along.
+//    • Release GRIP to drop it where it is.
 //
-//  WHAT THIS VERSION TESTS (zero new APIs, safe to run):
-//    Every second while you hold GRIP we do three things and log them:
-//       1. read the cube position BEFORE   -> "before"
-//       2. write  block.pos = handPos      (the attempted move)
-//       3. read the cube position AFTER    -> "after"
-//    Then we compare:
-//       • If "after" == hand  -> the setter WORKS (problem is elsewhere)
-//       • If "after" == before/spawn -> the setter is a NO-OP (confirmed),
-//         and we must move the cube a different way. The console will
-//         literally print "SETTER WORKS" or "SETTER IGNORED" so we get
-//         a definitive answer in one test.
+//  =====  THE JOURNEY (what was actually wrong, in order)  =====
+//    1. A self-cancelling "offset" calc (cube = hand + (cube-hand) =
+//       cube) re-pinned the cube to its spawn point. -> removed.
+//    2. We couldn't SEE any console.log output because the in-world
+//       console must be switched ON first with inWorldConsole.visible().
+//       -> now enabled in start().
+//    3. The read-back test proved `block.pos = handPos` DOES move the
+//       cube (the earlier "stuck" feeling came from bug #1, not the
+//       setter). So position assignment is the correct approach.
 //
-//    We ALSO try block.rot the same way, since you said early on you
-//    could "rotate it in one spot" — that tells us if rotation writes
-//    behave differently from position writes.
+//  This file keeps the in-world console ON (handy while learning) and
+//  applies BOTH position and rotation each frame so the cube is fully
+//  held in your hand. To remove the console later, delete the marked
+//  line in start().
 // =============================================================
 
 
@@ -38,32 +38,50 @@ import { Quaternion } from "./Yuu API/Basic Types/Quaternion";
 import { Color } from "./Yuu API/Basic Types/Color";
 
 
-// ---- 2. SETTINGS -----------------------------------------------
+// ---- 2. SETTINGS YOU CAN TWEAK ---------------------------------
+// How close (meters) your hand must be to the cube to grab it.
 const GRAB_RANGE = 0.30;
+
+// Where the cube first appears (world space) when the world loads.
 const SPAWN_POSITION = new Vector3(0, 1.2, -0.8);
+
+// Cube size (30 cm).
 const CUBE_SIZE = new Vector3(0.3, 0.3, 0.3);
+
+// Where the in-world console panel floats. Delete the line that uses
+// this in start() if you don't want the console showing.
 const CONSOLE_POSITION = new Vector3(-1.2, 1.5, -1.0);
 
 
 // ---- 3. SHARED MEMORY ------------------------------------------
 let block: Entity | undefined;
 let heldByHand: "left" | "right" | undefined;
-let frameCount = 0;
 
 
 // ---- 4. START --------------------------------------------------
 registerStart(start);
 
 function start() {
+  // Turn the in-world console ON so console.log is visible.
+  // (Remove this one line to hide the console.)
   inWorldConsole.visible(true, CONSOLE_POSITION, Quaternion.one);
 
+  // Spawn the cube. "Animated" = an object we move from code.
   block = spawnPrimitive.cube(
-    SPAWN_POSITION, CUBE_SIZE, Quaternion.one,
-    Color.red, 1, true, "Animated", undefined
+    SPAWN_POSITION,   // POSITION
+    CUBE_SIZE,        // SIZE
+    Quaternion.one,   // ROTATION: none to start
+    Color.red,        // COLOR
+    1,                // ALPHA: solid
+    true,             // HAS COLLIDER
+    "Animated",       // TYPE
+    undefined         // PARENT
   );
 
-  console.log("READ-BACK TEST ready. Grab the cube and move.");
+  console.log("Block spawned. Squeeze GRIP near it to grab.");
 
+  // "Update"   = runs every frame WHILE the button is held.
+  // "Released" = runs once, the moment you let go.
   Controller.subscribe("leftGrip",  "Update",   () => onGripHeld("left"));
   Controller.subscribe("leftGrip",  "Released", () => onGripReleased("left"));
   Controller.subscribe("rightGrip", "Update",   () => onGripHeld("right"));
@@ -71,62 +89,44 @@ function start() {
 }
 
 
-// ---- 5. GRAB + TEST --------------------------------------------
+// ---- 5. GRABBING + CARRYING + ROTATING -------------------------
 function onGripHeld(hand: "left" | "right") {
   if (!block) return;
 
+  // Live hand transform (already world-space on this build).
   const handPos = hand === "left"
     ? Player.leftHand.position.get()
     : Player.rightHand.position.get();
-  if (!handPos) return;
+  const handRot = hand === "left"
+    ? Player.leftHand.rotation.get()
+    : Player.rightHand.rotation.get();
+  if (!handPos) return; // controller not tracked this frame
 
-  // Grab if free.
+  // STEP A — grab if the cube is free and your hand is close enough.
   if (heldByHand === undefined) {
     if (block.pos.distanceTo(handPos) < GRAB_RANGE) {
       heldByHand = hand;
-      block.collidable.set(false);
-      frameCount = 0;
-      console.log("GRABBED (" + hand + ")");
+      block.collidable.set(false); // don't fight your body while carried
+      console.log("Grabbed with the " + hand + " hand!");
     }
   }
 
-  if (heldByHand !== hand) return;
-
-  // 1) read BEFORE
-  const before = block.pos;
-
-  // 2) attempt the move
-  block.pos = handPos;
-
-  // 3) read AFTER
-  const after = block.pos;
-
-  // Log + verdict once per second so it's readable.
-  frameCount++;
-  if (frameCount % 30 === 0) {
-    console.log("hand   " + fmt(handPos));
-    console.log("before " + fmt(before));
-    console.log("after  " + fmt(after));
-    // Did 'after' actually become the hand position?
-    const moved = after.distanceTo(handPos) < 0.001;
-    console.log(moved ? ">> SETTER WORKS" : ">> SETTER IGNORED");
+  // STEP B — carry: move AND rotate the cube to match the hand.
+  if (heldByHand === hand) {
+    block.pos = handPos;            // follow the hand position
+    if (handRot) {
+      block.rot = handRot;          // turn with your wrist
+    }
   }
 }
 
 
-// ---- 6. DROP ---------------------------------------------------
+// ---- 6. DROPPING -----------------------------------------------
 function onGripReleased(hand: "left" | "right") {
   if (!block) return;
   if (heldByHand === hand) {
     heldByHand = undefined;
-    block.collidable.set(true);
-    console.log("DROPPED at " + fmt(block.pos));
+    block.collidable.set(true);    // solid again where you dropped it
+    console.log("Dropped the block.");
   }
-}
-
-
-// ---- 7. helper -------------------------------------------------
-function fmt(v: Vector3 | undefined): string {
-  if (!v) return "(?)";
-  return "(" + v.x.toFixed(2) + ", " + v.y.toFixed(2) + ", " + v.z.toFixed(2) + ")";
 }
