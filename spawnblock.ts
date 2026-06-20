@@ -1,27 +1,48 @@
 // =============================================================
-//  Yuu Online — First Interactive (Grabbable) Block!
+//  Yuu Online — Grabbable Block (grab • CARRY • drop) 🧊
 // =============================================================
 //  WHAT THIS DOES:
-//    • Spawns one colorful cube floating in front of you.
-//    • Lets you GRAB it with either hand using the GRIP button.
-//    • While you keep squeezing GRIP, the cube follows your hand.
-//    • When you let go, the cube stays where you dropped it.
+//    • Spawns a red cube floating in front of you.
+//    • GRIP near it to grab with either hand.
+//    • While you keep squeezing GRIP, the cube travels WITH you —
+//      you can physically move your hand AND glide/teleport around
+//      the world, and it stays in your hand the whole time.
+//    • Let go of GRIP and the cube stays where you dropped it.
 //
-//  HOW IT WORKS (the big picture):
-//    1. When the world loads, Yuu Online runs our start() function.
-//    2. start() spawns the cube and "listens" to the grip buttons.
-//    3. Every frame that you hold GRIP, we check: is your hand
-//       touching the cube? If yes, the cube sticks to your hand.
-//    4. Releasing GRIP simply lets the cube go.
+//  =====  WHY THE EARLIER VERSIONS DIDN'T CARRY  ==============
 //
-//  Read the comments below — each section explains one idea.
+//  THE REAL BUG #1 (locomotion):
+//    `Player.leftHand.position.get()` returns the hand transform in
+//    PLAYER-LOCAL space (the API docs literally say "Access local
+//    player transform data"). That means the number describes where
+//    your hand is *relative to your own body rig*, NOT where it is in
+//    the world.
+//      → When you stood still and waved your hand, that local number
+//        changed, so `block.pos = handPos` looked like it worked.
+//      → But when you GLIDED/TELEPORTED across the world, your body
+//        rig moved while the hand's LOCAL number barely changed — so
+//        the cube was written to (almost) the same world coordinate
+//        every frame and got left behind. That's the "I can move away
+//        but the cube stays stuck and I manipulate it from a distance"
+//        symptom.
+//    FIX: convert the local hand transform into WORLD space using the
+//         player's own world position + rotation, every frame:
+//             worldHand = playerPos + (playerRot ⊗ localHand)
+//
+//  THE REAL BUG #2 (the previous "offset" attempt):
+//    The last version did:
+//         grabOffset = block.pos - handPos
+//         block.pos  = handPos + grabOffset
+//    Those two lines cancel out to `block.pos = block.pos`, which
+//    literally re-pins the cube to its ORIGINAL spot forever. That's
+//    why it stopped moving entirely while rotation still applied.
+//    FIX: removed that self-cancelling math. The cube now snaps to the
+//         live WORLD hand position (with a small, tweakable hold
+//         offset) so it genuinely rides along with you.
 // =============================================================
 
 
 // ---- 1. IMPORTS -------------------------------------------------
-// Imports pull in ready-made tools from the Yuu API so we don't
-// have to write them ourselves. Think of them like getting tools
-// out of a toolbox before starting a project.
 import { registerStart } from "./Yuu API/RegisterStart";
 import { spawnPrimitive } from "./Yuu API/SpawnPrimitive";
 import { Entity } from "./Yuu API/Entity";
@@ -33,50 +54,86 @@ import { Color } from "./Yuu API/Basic Types/Color";
 
 
 // ---- 2. SETTINGS YOU CAN TWEAK ---------------------------------
-// GRAB_RANGE is how close (in meters) your hand must be to the cube
-// before you can grab it. 0.25 = 25 centimeters. Try changing it!
-const GRAB_RANGE = 0.25;
+// How close (meters) your hand must be to the cube to grab it.
+const GRAB_RANGE = 0.30;
+
+// Where the cube first appears (world space) when the world loads.
+//   x = 0    -> centred left/right
+//   y = 1.2  -> roughly chest height
+//   z = -0.8 -> a comfortable arm's reach in front
+const SPAWN_POSITION = new Vector3(0, 1.2, -0.8);
+
+// Cube size (30 cm).
+const CUBE_SIZE = new Vector3(0.3, 0.3, 0.3);
+
+// Where the cube sits relative to the hand WHILE HELD, expressed in
+// the hand's own local frame (x=right, y=up, z=-forward).
+//   • (0,0,0)        = cube centre sits exactly on the controller.
+//   • (0,0,-0.12)    = cube floats ~12 cm out in front of the palm
+//                      so the controller doesn't visually swallow it.
+const HOLD_OFFSET = new Vector3(0, 0, -0.12);
 
 
-// ---- 3. MEMORY (variables that the whole file shares) ----------
-// We keep a reference to our cube here so every function can use it.
-// It starts as "undefined" because the cube doesn't exist until the
-// world loads and start() creates it.
+// ---- 3. SHARED MEMORY ------------------------------------------
 let block: Entity | undefined;
-
-// Remembers which hand is currently holding the block.
-// It is "left", "right", or undefined (meaning: nobody is holding it).
 let heldByHand: "left" | "right" | undefined;
 
 
-// ---- 4. registerStart: the on-switch for our code --------------
-// This line tells Yuu Online: "When the world loads, run start()."
-// Without it, none of our code would ever run.
+// ---- 4. MATH HELPERS -------------------------------------------
+// Rotate a vector by a quaternion (q ⊗ v ⊗ q⁻¹), using the standard
+// fast form:  v' = v + 2w(u×v) + 2u×(u×v),  where u = (q.x,q.y,q.z).
+// We need this to turn LOCAL offsets/positions into WORLD space.
+function rotateVectorByQuat(q: Quaternion, v: Vector3): Vector3 {
+  const u = new Vector3(q.x, q.y, q.z);   // vector part of the quaternion
+  const uv = u.cross(v);                   // u × v
+  const uuv = u.cross(uv);                 // u × (u × v)
+  // v + 2w(u×v) + 2(u×(u×v))
+  return v.add(uv.multiply(2 * q.w)).add(uuv.multiply(2));
+}
+
+
+// ---- 5. WORLD-SPACE HAND TRANSFORM -----------------------------
+// Combines the player's WORLD transform with the hand's LOCAL
+// transform to get the hand's true WORLD position & rotation.
+// Returns undefined if any tracking data is missing this frame.
+function getWorldHand(
+  hand: "left" | "right"
+): { pos: Vector3; rot: Quaternion } | undefined {
+  const playerPos = Player.position.get();
+  const playerRot = Player.rotation.get();
+  const localPos =
+    hand === "left" ? Player.leftHand.position.get() : Player.rightHand.position.get();
+  const localRot =
+    hand === "left" ? Player.leftHand.rotation.get() : Player.rightHand.rotation.get();
+
+  if (!playerPos || !playerRot || !localPos || !localRot) return undefined;
+
+  // worldPos = playerPos + (playerRot rotates the local hand offset)
+  const worldPos = playerPos.add(rotateVectorByQuat(playerRot, localPos));
+  // worldRot = playerRot ⊗ localRot  (combine the two rotations)
+  const worldRot = playerRot.multiply(localRot);
+
+  return { pos: worldPos, rot: worldRot };
+}
+
+
+// ---- 6. registerStart: the on-switch ---------------------------
 registerStart(start);
 
 function start() {
-  // --- Spawn the cube ---
-  // spawnPrimitive.cube(...) creates a cube and hands us back an
-  // Entity we can move around later. Here is what each value means:
   block = spawnPrimitive.cube(
-    new Vector3(0, 1.2, -1.5),    // POSITION: x=0 (centered), y=1.2 (chest height), z=-1.5 (1.5m in front of you)
-    new Vector3(0.3, 0.3, 0.3),   // SIZE: a small 30cm cube that is easy to grab
-    Quaternion.one,               // ROTATION: Quaternion.one means "no rotation"
-    Color.red,                    // COLOR: bright red so it's easy to see
-    1,                            // ALPHA: 1 = fully solid (0 would be invisible)
-    true,                         // HAS COLLIDER: true makes it a real, solid object
-    "Animated",                   // TYPE: "Animated" = an object we move with our own code
-    undefined                     // PARENT: undefined = it stands on its own
+    SPAWN_POSITION,   // POSITION
+    CUBE_SIZE,        // SIZE
+    Quaternion.one,   // ROTATION: none
+    Color.red,        // COLOR
+    1,                // ALPHA: solid
+    true,             // HAS COLLIDER
+    "Animated",       // TYPE: we move it from code
+    undefined         // PARENT
   );
 
-  // console.log messages show up in the in-world Console panel,
-  // exactly like the "Hello World!" you saw in Step 1.
-  console.log("Block spawned! Move your hand to it and squeeze GRIP to grab.");
+  console.log("Block spawned! Reach to it and squeeze GRIP to grab.");
 
-  // --- Listen to the GRIP buttons on BOTH controllers ---
-  // Controller.subscribe(button, when, whatToDo)
-  //   • "Update"   = runs every frame WHILE the button is held down.
-  //   • "Released" = runs once, the moment you let the button go.
   Controller.subscribe("leftGrip",  "Update",   () => onGripHeld("left"));
   Controller.subscribe("leftGrip",  "Released", () => onGripReleased("left"));
   Controller.subscribe("rightGrip", "Update",   () => onGripHeld("right"));
@@ -84,56 +141,44 @@ function start() {
 }
 
 
-// ---- 5. GRABBING + CARRYING ------------------------------------
-// This runs every frame that a GRIP button is held down.
+// ---- 7. GRABBING + CARRYING ------------------------------------
+// Runs every frame a GRIP button is held.
 function onGripHeld(hand: "left" | "right") {
-  // Safety check: if the cube doesn't exist, do nothing.
   if (!block) return;
 
-  // Find out where the squeezing hand is in the world right now.
-  const handPos =
-    hand === "left"
-      ? Player.leftHand.position.get()
-      : Player.rightHand.position.get();
+  // Live WORLD-space hand transform (this is the key fix).
+  const worldHand = getWorldHand(hand);
+  if (!worldHand) return; // controller / player not tracked this frame
 
-  // The hand position can be undefined if the controller isn't tracked.
-  if (!handPos) return;
-
-  // STEP A — Try to grab:
-  // If nobody is holding the cube yet, check whether THIS hand is
-  // close enough (within GRAB_RANGE) to pick it up.
+  // STEP A — try to grab if the cube is free.
   if (heldByHand === undefined) {
-    const distance = block.pos.distanceTo(handPos);
+    const distance = block.pos.distanceTo(worldHand.pos);
     if (distance < GRAB_RANGE) {
-      heldByHand = hand; // remember who grabbed it
+      heldByHand = hand;
+      block.collidable.set(false); // stop it fighting your body while carried
       console.log("Grabbed with the " + hand + " hand!");
     }
   }
 
-  // STEP B — Carry:
-  // If THIS hand is the one holding the cube, move the cube to the
-  // hand's position so it appears to be held. We also copy the hand's
-  // rotation so the cube turns naturally as you twist your wrist.
+  // STEP B — carry (only the hand that grabbed it).
   if (heldByHand === hand) {
-    block.pos = handPos;
-
-    const handRot =
-      hand === "left"
-        ? Player.leftHand.rotation.get()
-        : Player.rightHand.rotation.get();
-    if (handRot) {
-      block.rot = handRot;
-    }
+    // Place the cube at the hand, nudged out by HOLD_OFFSET expressed
+    // in the hand's own orientation, so it rides naturally in the palm.
+    const worldOffset = rotateVectorByQuat(worldHand.rot, HOLD_OFFSET);
+    block.pos = worldHand.pos.add(worldOffset);
+    block.rot = worldHand.rot; // turn the cube with your wrist
   }
 }
 
 
-// ---- 6. DROPPING -----------------------------------------------
-// This runs once, the moment you release a GRIP button.
+// ---- 8. DROPPING -----------------------------------------------
+// Runs once, the moment you release a GRIP button.
 function onGripReleased(hand: "left" | "right") {
-  // Only let go if it was THIS hand that was holding the cube.
+  if (!block) return;
+
   if (heldByHand === hand) {
-    heldByHand = undefined; // free the cube — it stays where you left it
+    heldByHand = undefined;
+    block.collidable.set(true); // solid again where you dropped it
     console.log("Dropped the block.");
   }
 }
