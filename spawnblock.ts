@@ -48,6 +48,13 @@ const SPAWN_POSITION = new Vector3(0, 1.2, -0.8);
 // Cube size (30 cm).
 const CUBE_SIZE = new Vector3(0.3, 0.3, 0.3);
 
+// Whether the cube should also rotate to match your wrist.
+//   false = MOVE ONLY (confirmed working — start here).
+//   true  = also try rotation (may freeze movement on this build;
+//           the try/catch around it will keep movement alive and log
+//           the problem so we can show Laex exactly what happens).
+const ENABLE_ROTATION = false;
+
 // Where the in-world console panel floats. Delete the line that uses
 // this in start() if you don't want the console showing.
 const CONSOLE_POSITION = new Vector3(-1.2, 1.5, -1.0);
@@ -111,11 +118,21 @@ function onGripHeld(hand: "left" | "right") {
     }
   }
 
-  // STEP B — carry: move AND rotate the cube to match the hand.
+  // STEP B — carry: move the cube to the hand (CONFIRMED WORKING).
   if (heldByHand === hand) {
     block.pos = handPos;            // follow the hand position
-    if (handRot) {
-      block.rot = handRot;          // turn with your wrist
+
+    // Rotation is attempted SEPARATELY and defensively. In testing,
+    // setting block.rot on the same frame as block.pos made the cube
+    // stop moving entirely — so we isolate it: if the rotation write
+    // ever fails or interferes, the try/catch keeps the (working)
+    // position update alive and logs the problem instead of freezing.
+    if (ENABLE_ROTATION && handRot) {
+      try {
+        block.rot = handRot;        // turn with your wrist
+      } catch (e) {
+        console.log("rot write failed: " + e);
+      }
     }
   }
 }
