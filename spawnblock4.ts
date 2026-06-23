@@ -54,6 +54,17 @@ import { Color } from "./Yuu API/Basic Types/Color";
 
 
 // ---- 2. SETTINGS YOU CAN TWEAK ---------------------------------
+// *** SAFETY SWITCH ***
+//   true  = switch the cube to "Empty" while carried so it can MOVE
+//           and ROTATE together (the rotation fix we're testing).
+//   false = never change type. The cube stays "Animated" the whole
+//           time. This is the GUARANTEED-GRABBABLE behaviour we know
+//           works — you can carry it, but rotating it may freeze
+//           movement (the old known issue).
+//   If grabbing ever breaks again, set this to false and reload to
+//   get a working cube back instantly.
+const SWITCH_TYPE_ON_GRAB = true;
+
 // How close (meters) your hand must be to the cube to grab it.
 const GRAB_RANGE = 0.30;
 
@@ -128,14 +139,14 @@ function start() {
     Color.red,        // COLOR
     1,                // ALPHA: solid
     true,             // HAS COLLIDER
-    // TYPE: trying "Static" (Empty had no collision detection).
-    // The motion test proved "Animated" breaks same-frame pos+rot.
-    // Static nodes are meant to "never move," but we'll override
-    // their position every frame anyway — worst case, the engine
-    // might route that through over-time again. If Static also
-    // freezes, we'll need dynamic type-switching (spawn Static,
-    // changeType("Empty") on grab, back to Static on drop).
-    "Static",         // TYPE: was "Animated", tried "Empty" (no collider)
+    // TYPE: spawn as "Animated" — this is the type that is grabbable
+    // and solid (it has a working collider). We DON'T leave it as
+    // Animated while carrying though: the motion test proved Animated
+    // drops one of two same-frame writes, freezing movement when we
+    // set pos+rot together. So we switch to "Empty" on grab (where the
+    // test proved pos+rot BOTH apply smoothly) and switch back to
+    // "Animated" on drop so it's solid & grabbable again.
+    "Animated",       // TYPE: grabbable at rest; we changeType on grab
     undefined         // PARENT
   );
 
@@ -162,7 +173,17 @@ function onGripHeld(hand: "left" | "right") {
     const distance = block.pos.distanceTo(worldHand.pos);
     if (distance < GRAB_RANGE) {
       heldByHand = hand;
-      block.collidable.set(false); // stop it fighting your body while carried
+      // Turn off collision first so it doesn't fight your body while
+      // carried. Guarded: if the type has no collider this won't crash
+      // the whole grip handler.
+      try { block.collidable.set(false); } catch (e) { /* ignore */ }
+      // Switch to "Empty" for the carry. The motion test proved Empty
+      // applies pos AND rot on the same frame with no freeze, while
+      // Animated drops one of them. This is what makes carry+rotate work.
+      // Gated behind the safety switch so it's easy to turn off.
+      if (SWITCH_TYPE_ON_GRAB) {
+        try { block.changeType("Empty"); } catch (e) { /* ignore */ }
+      }
       console.log("Grabbed with the " + hand + " hand!");
     }
   }
@@ -185,7 +206,14 @@ function onGripReleased(hand: "left" | "right") {
 
   if (heldByHand === hand) {
     heldByHand = undefined;
-    block.collidable.set(true); // solid again where you dropped it
+    // Switch back to "Animated" so the cube is solid & grabbable again
+    // where you dropped it. (Empty has no collider, so we must restore
+    // a collidable type before turning collision back on.) Only needed
+    // if we switched on grab.
+    if (SWITCH_TYPE_ON_GRAB) {
+      try { block.changeType("Animated"); } catch (e) { /* ignore */ }
+    }
+    try { block.collidable.set(true); } catch (e) { /* ignore */ }
     console.log("Dropped the block.");
   }
 }
