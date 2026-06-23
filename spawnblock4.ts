@@ -128,15 +128,14 @@ function start() {
     Color.red,        // COLOR
     1,                // ALPHA: solid
     true,             // HAS COLLIDER
-    // TYPE: "Empty", NOT "Animated".  *** This is the key fix. ***
-    // The motion unit test proved (with read-back logs) that the
-    // "Animated" node type routes every pos/rot assignment through the
-    // engine's over-time utility, which (a) steps/overshoots a single
-    // property and (b) DROPS one of two same-frame writes — so setting
-    // pos AND rot on one frame froze position. "Empty" snaps instantly
-    // and lets pos + rot both apply every frame, which is exactly what
-    // a hand-carried, wrist-rotating cube needs.
-    "Empty",          // TYPE: code-driven motion (was "Animated")
+    // TYPE: trying "Static" (Empty had no collision detection).
+    // The motion test proved "Animated" breaks same-frame pos+rot.
+    // Static nodes are meant to "never move," but we'll override
+    // their position every frame anyway — worst case, the engine
+    // might route that through over-time again. If Static also
+    // freezes, we'll need dynamic type-switching (spawn Static,
+    // changeType("Empty") on grab, back to Static on drop).
+    "Static",         // TYPE: was "Animated", tried "Empty" (no collider)
     undefined         // PARENT
   );
 
