@@ -1,158 +1,192 @@
 // =============================================================
-//  Yuu Online — MOTION UNIT TEST  v3  (for Laex) 🧪
-//  ROOT-CAUSE TEST: is the "Animated" node type's OVER-TIME
-//  utility what's breaking same-frame pos+rot AND causing the
-//  erratic single-axis motion?
+//  Yuu Online — Grabbable Block (grab • CARRY • drop) 🧊
 // =============================================================
-//  WHAT v2's LOG PROVED (real in-headset numbers):
-//    • YELLOW (pos THEN rot): y stuck at 1.30 forever -> position
-//      write DROPPED. Only rotation applied.
-//    • ORANGE (rot THEN pos): y changed every frame -> position
-//      applied, but rotation dropped.
-//        => On one frame, the LAST transform write wins; the FIRST
-//           is silently clobbered. No ordering gives BOTH.
-//    • GREEN (pos only): read-back x hit 1.26 / 1.42 — IMPOSSIBLE
-//      from our math (range is only -1.65..0.35), and it stepped /
-//      held instead of gliding. => `entity.pos =` is NOT snapping;
-//      it is being routed through an over-time interpolator that
-//      overshoots and steps.
+//  WHAT THIS DOES:
+//    • Spawns a red cube floating in front of you.
+//    • GRIP near it to grab with either hand.
+//    • While you keep squeezing GRIP, the cube travels WITH you —
+//      you can physically move your hand AND glide/teleport around
+//      the world, and it stays in your hand the whole time.
+//    • Let go of GRIP and the cube stays where you dropped it.
 //
-//  HYPOTHESIS:
-//    The "Animated" node type sends every `entity.pos`/`entity.rot`
-//    assignment through the over-time utility. That utility (a)
-//    overshoots/steps a single property, and (b) drops one of two
-//    same-frame writes. A node type WITHOUT animation ("Empty")
-//    should snap immediately and let pos+rot both apply.
+//  =====  WHY THE EARLIER VERSIONS DIDN'T CARRY  ==============
 //
-//  THE EXPERIMENT (controlled A/B):
-//    🔵 BLUE   = "Animated", pos ONLY          (reproduce the step/overshoot)
-//    🟢 GREEN  = "Empty",    pos ONLY          (is it smooth now?)
-//    🔴 RED    = "Animated", pos + rot same frame (control: should freeze)
-//    🟡 YELLOW = "Empty",    pos + rot same frame (does Empty fix the freeze?)
+//  THE REAL BUG #1 (locomotion):
+//    `Player.leftHand.position.get()` returns the hand transform in
+//    PLAYER-LOCAL space (the API docs literally say "Access local
+//    player transform data"). That means the number describes where
+//    your hand is *relative to your own body rig*, NOT where it is in
+//    the world.
+//      → When you stood still and waved your hand, that local number
+//        changed, so `block.pos = handPos` looked like it worked.
+//      → But when you GLIDED/TELEPORTED across the world, your body
+//        rig moved while the hand's LOCAL number barely changed — so
+//        the cube was written to (almost) the same world coordinate
+//        every frame and got left behind. That's the "I can move away
+//        but the cube stays stuck and I manipulate it from a distance"
+//        symptom.
+//    FIX: convert the local hand transform into WORLD space using the
+//         player's own world position + rotation, every frame:
+//             worldHand = playerPos + (playerRot ⊗ localHand)
 //
-//  HOW TO READ THE LOG (printed every second):
-//    BLUE.x / GREEN.x  -> horizontal travel; compare smoothness.
-//    RED.y  / YELLOW.y -> vertical travel while spinning.
-//      • If GREEN.x glides smoothly in range while BLUE.x steps /
-//        overshoots  -> node type (over-time utility) is the cause.
-//      • If YELLOW.y changes (and yellow visibly moves AND spins)
-//        while RED.y stays frozen -> "Empty" is the workaround. ✅
+//  THE REAL BUG #2 (the previous "offset" attempt):
+//    The last version did:
+//         grabOffset = block.pos - handPos
+//         block.pos  = handPos + grabOffset
+//    Those two lines cancel out to `block.pos = block.pos`, which
+//    literally re-pins the cube to its ORIGINAL spot forever. That's
+//    why it stopped moving entirely while rotation still applied.
+//    FIX: removed that self-cancelling math. The cube now snaps to the
+//         live WORLD hand position (with a small, tweakable hold
+//         offset) so it genuinely rides along with you.
 // =============================================================
 
 
 // ---- 1. IMPORTS -------------------------------------------------
 import { registerStart } from "./Yuu API/RegisterStart";
 import { spawnPrimitive } from "./Yuu API/SpawnPrimitive";
+import { Entity } from "./Yuu API/Entity";
+import { Controller } from "./Yuu API/Controller";
+import { Player } from "./Yuu API/Player";
 import { Vector3 } from "./Yuu API/Basic Types/Vector3";
 import { Quaternion } from "./Yuu API/Basic Types/Quaternion";
 import { Color } from "./Yuu API/Basic Types/Color";
-import { Events } from "./Yuu API/Events";
-import { inWorldConsole } from "./Yuu API/Console";
 
 
-// ---- 2. SETTINGS -----------------------------------------------
-const LEG_SECONDS = 5;          // seconds per out-and-back leg
-const TRAVEL_DISTANCE = 2.0;    // meters travelled
-const TEST_ORIGIN = new Vector3(0, 1.3, -3.0);
-const CUBE_GAP = 1.1;           // spacing between cubes
+// ---- 2. SETTINGS YOU CAN TWEAK ---------------------------------
+// How close (meters) your hand must be to the cube to grab it.
+const GRAB_RANGE = 0.30;
+
+// Where the cube first appears (world space) when the world loads.
+//   x = 0    -> centred left/right
+//   y = 1.2  -> roughly chest height
+//   z = -0.8 -> a comfortable arm's reach in front
+const SPAWN_POSITION = new Vector3(0, 1.2, -0.8);
+
+// Cube size (30 cm).
 const CUBE_SIZE = new Vector3(0.3, 0.3, 0.3);
-const LOG_EVERY = 1.0;          // seconds between diagnostic logs
+
+// Where the cube sits relative to the hand WHILE HELD, expressed in
+// the hand's own local frame (x=right, y=up, z=-forward).
+//   • (0,0,0)        = cube centre sits exactly on the controller.
+//   • (0,0,-0.12)    = cube floats ~12 cm out in front of the palm
+//                      so the controller doesn't visually swallow it.
+const HOLD_OFFSET = new Vector3(0, 0, -0.12);
 
 
-// ---- 3. PURE MATH HELPERS (build fresh vectors; cannot drift) --
-function lerpVec(ax: number, ay: number, az: number,
-                 bx: number, by: number, bz: number,
-                 t: number): Vector3 {
-  return new Vector3(ax + (bx - ax) * t, ay + (by - ay) * t, az + (bz - az) * t);
+// ---- 3. SHARED MEMORY ------------------------------------------
+let block: Entity | undefined;
+let heldByHand: "left" | "right" | undefined;
+
+
+// ---- 4. MATH HELPERS -------------------------------------------
+// Rotate a vector by a quaternion (q ⊗ v ⊗ q⁻¹), using the standard
+// fast form:  v' = v + 2w(u×v) + 2u×(u×v),  where u = (q.x,q.y,q.z).
+// We need this to turn LOCAL offsets/positions into WORLD space.
+function rotateVectorByQuat(q: Quaternion, v: Vector3): Vector3 {
+  const u = new Vector3(q.x, q.y, q.z);   // vector part of the quaternion
+  const uv = u.cross(v);                   // u × v
+  const uuv = u.cross(uv);                 // u × (u × v)
+  // v + 2w(u×v) + 2(u×(u×v))
+  return v.add(uv.multiply(2 * q.w)).add(uuv.multiply(2));
 }
-function spinXYZ(t: number): Quaternion {
-  const a = t * Math.PI * 2;
-  return Quaternion.fromEuler(new Vector3(a, a, a));
-}
-function pingPong(t: number): number {
-  const x = t % 2;             // 0..2
-  return x <= 1 ? x : 2 - x;   // 0..1..0
+
+
+// ---- 5. WORLD-SPACE HAND TRANSFORM -----------------------------
+// Combines the player's WORLD transform with the hand's LOCAL
+// transform to get the hand's true WORLD position & rotation.
+// Returns undefined if any tracking data is missing this frame.
+function getWorldHand(
+  hand: "left" | "right"
+): { pos: Vector3; rot: Quaternion } | undefined {
+  const playerPos = Player.position.get();
+  const playerRot = Player.rotation.get();
+  const localPos =
+    hand === "left" ? Player.leftHand.position.get() : Player.rightHand.position.get();
+  const localRot =
+    hand === "left" ? Player.leftHand.rotation.get() : Player.rightHand.rotation.get();
+
+  if (!playerPos || !playerRot || !localPos || !localRot) return undefined;
+
+  // worldPos = playerPos + (playerRot rotates the local hand offset)
+  const worldPos = playerPos.add(rotateVectorByQuat(playerRot, localPos));
+  // worldRot = playerRot ⊗ localRot  (combine the two rotations)
+  const worldRot = playerRot.multiply(localRot);
+
+  return { pos: worldPos, rot: worldRot };
 }
 
 
-// ---- 4. ENTRY POINT --------------------------------------------
+// ---- 6. registerStart: the on-switch ---------------------------
 registerStart(start);
 
 function start() {
-  inWorldConsole.visible(true, new Vector3(0, 2.3, -3), Quaternion.one);
-
-  console.log(">>> MOTION UNIT TEST v3 (node-type A/B) <<<");
-  console.log("BLUE=Animated posOnly | GREEN=Empty posOnly");
-  console.log("RED=Animated pos+rot  | YELLOW=Empty pos+rot");
-
-  // Column X positions (left -> right).
-  const ox = TEST_ORIGIN.x, oy = TEST_ORIGIN.y, oz = TEST_ORIGIN.z;
-  const blueX   = ox - CUBE_GAP * 1.5;
-  const greenX  = ox - CUBE_GAP * 0.5;
-  const redX    = ox + CUBE_GAP * 0.5;
-  const yellowX = ox + CUBE_GAP * 1.5;
-
-  // -- spawn four cubes, varying ONLY the node type --------------
-  // BLUE: Animated, will move on X only.
-  const blueCube = spawnPrimitive.cube(
-    new Vector3(blueX, oy, oz),
-    CUBE_SIZE, Quaternion.one, Color.blue, 1, false, "Animated", undefined
-  );
-  // GREEN: Empty, will move on X only.
-  const greenCube = spawnPrimitive.cube(
-    new Vector3(greenX, oy, oz),
-    CUBE_SIZE, Quaternion.one, Color.green, 1, false, "Empty", undefined
-  );
-  // RED: Animated, will move on Y AND rotate (control - expect freeze).
-  const redCube = spawnPrimitive.cube(
-    new Vector3(redX, oy, oz),
-    CUBE_SIZE, Quaternion.one, Color.red, 1, false, "Animated", undefined
-  );
-  // YELLOW: Empty, will move on Y AND rotate (does Empty fix it?).
-  const yellowCube = spawnPrimitive.cube(
-    new Vector3(yellowX, oy, oz),
-    CUBE_SIZE, Quaternion.one, Color.yellow, 1, false, "Empty", undefined
+  block = spawnPrimitive.cube(
+    SPAWN_POSITION,   // POSITION
+    CUBE_SIZE,        // SIZE
+    Quaternion.one,   // ROTATION: none
+    Color.red,        // COLOR
+    1,                // ALPHA: solid
+    true,             // HAS COLLIDER
+    // TYPE: "Empty", NOT "Animated".  *** This is the key fix. ***
+    // The motion unit test proved (with read-back logs) that the
+    // "Animated" node type routes every pos/rot assignment through the
+    // engine's over-time utility, which (a) steps/overshoots a single
+    // property and (b) DROPS one of two same-frame writes — so setting
+    // pos AND rot on one frame froze position. "Empty" snaps instantly
+    // and lets pos + rot both apply every frame, which is exactly what
+    // a hand-carried, wrist-rotating cube needs.
+    "Empty",          // TYPE: code-driven motion (was "Animated")
+    undefined         // PARENT
   );
 
-  console.log("Spawned 4 cubes. Compare BLUE(anim) vs GREEN(empty).");
+  console.log("Block spawned! Reach to it and squeeze GRIP to grab.");
 
-  // -- per-frame driver -----------------------------------------
-  let elapsed = 0;
-  let sinceLog = 0;
+  Controller.subscribe("leftGrip",  "Update",   () => onGripHeld("left"));
+  Controller.subscribe("leftGrip",  "Released", () => onGripReleased("left"));
+  Controller.subscribe("rightGrip", "Update",   () => onGripHeld("right"));
+  Controller.subscribe("rightGrip", "Released", () => onGripReleased("right"));
+}
 
-  Events.onUpdate((deltaTime: number) => {
-    elapsed += deltaTime;
-    sinceLog += deltaTime;
 
-    const progress = pingPong(elapsed / LEG_SECONDS); // 0..1..0
-    const spinT = (elapsed / LEG_SECONDS) % 1;        // 0..1
+// ---- 7. GRABBING + CARRYING ------------------------------------
+// Runs every frame a GRIP button is held.
+function onGripHeld(hand: "left" | "right") {
+  if (!block) return;
 
-    // BLUE — Animated, pos only (X).
-    blueCube.pos = lerpVec(blueX, oy, oz, blueX + TRAVEL_DISTANCE, oy, oz, progress);
+  // Live WORLD-space hand transform (this is the key fix).
+  const worldHand = getWorldHand(hand);
+  if (!worldHand) return; // controller / player not tracked this frame
 
-    // GREEN — Empty, pos only (X).
-    greenCube.pos = lerpVec(greenX, oy, oz, greenX + TRAVEL_DISTANCE, oy, oz, progress);
-
-    // RED — Animated, pos + rot same frame (Y travel + tumble).
-    redCube.pos = lerpVec(redX, oy, oz, redX, oy + TRAVEL_DISTANCE, oz, progress);
-    redCube.rot = spinXYZ(spinT);
-
-    // YELLOW — Empty, pos + rot same frame (Y travel + tumble).
-    yellowCube.pos = lerpVec(yellowX, oy, oz, yellowX, oy + TRAVEL_DISTANCE, oz, progress);
-    yellowCube.rot = spinXYZ(spinT);
-
-    // -- read-back diagnostic -----------------------------------
-    if (sinceLog >= LOG_EVERY) {
-      sinceLog = 0;
-      console.log(
-        "t=" + elapsed.toFixed(1) +
-        " BLUE.x=" + blueCube.pos.x.toFixed(2) +
-        " GREEN.x=" + greenCube.pos.x.toFixed(2) +
-        " RED.y=" + redCube.pos.y.toFixed(2) +
-        " YEL.y=" + yellowCube.pos.y.toFixed(2)
-      );
+  // STEP A — try to grab if the cube is free.
+  if (heldByHand === undefined) {
+    const distance = block.pos.distanceTo(worldHand.pos);
+    if (distance < GRAB_RANGE) {
+      heldByHand = hand;
+      block.collidable.set(false); // stop it fighting your body while carried
+      console.log("Grabbed with the " + hand + " hand!");
     }
-  });
+  }
 
-  console.log(">>> Setup complete. Read the log. <<<");
+  // STEP B — carry (only the hand that grabbed it).
+  if (heldByHand === hand) {
+    // Place the cube at the hand, nudged out by HOLD_OFFSET expressed
+    // in the hand's own orientation, so it rides naturally in the palm.
+    const worldOffset = rotateVectorByQuat(worldHand.rot, HOLD_OFFSET);
+    block.pos = worldHand.pos.add(worldOffset);
+    block.rot = worldHand.rot; // turn the cube with your wrist
+  }
+}
+
+
+// ---- 8. DROPPING -----------------------------------------------
+// Runs once, the moment you release a GRIP button.
+function onGripReleased(hand: "left" | "right") {
+  if (!block) return;
+
+  if (heldByHand === hand) {
+    heldByHand = undefined;
+    block.collidable.set(true); // solid again where you dropped it
+    console.log("Dropped the block.");
+  }
 }
