@@ -1,3 +1,4 @@
+import { Vector3 } from "./Vector3";
 
 
 const colorEpsilon = 0.000001;
@@ -41,6 +42,11 @@ export class Color {
   static get magenta(): Color { return new Color(1, 0, 1); }
   static get yellow(): Color { return new Color(1, 1, 0); }
 
+  static get orange(): Color { return new Color(1, 0.5, 0); }
+  static get purple(): Color { return new Color(0.5, 0, 1); }
+  static get pink(): Color { return new Color(1, 0.686, 0.88); }
+  static get lavender(): Color { return new Color(0.859, 0.757, 1); }
+
   static randomHue(saturation: number = 1, value: number = 1): Color {
     return Color.fromHSV(Math.random(), saturation, value);
   }
@@ -72,6 +78,33 @@ export class Color {
       case 5: r = v, g = p, b = q; break;
     }
 
-    return new Color(r, g , b);
+    return new Color(r, g, b);
+  }
+
+  static toHSV(color: Color): Vector3 {
+    const max = Math.max(color.r, color.g, color.b);
+    const min = Math.min(color.r, color.g, color.b);
+    const delta = max - min;
+
+    let h = 0;
+    let s = 0;
+    const v = max;
+
+    if (delta > colorEpsilon) {
+      s = delta / max;
+
+      if (max === color.r) {
+        h = ((color.g - color.b) / delta);
+      } else if (max === color.g) {
+        h = (color.b - color.r) / delta + 2;
+      } else {
+        h = (color.r - color.g) / delta + 4;
+      }
+
+      h /= 6;
+      if (h < 0) h += 1;
+    }
+
+    return new Vector3(h, s, v);
   }
 }

@@ -2,6 +2,7 @@ import { Vector3 } from "./Basic Types/Vector3";
 import { Entity } from "./Entity";
 import { entity_Data } from "./Entity_Data";
 import { Events } from "./Events";
+import { Player } from "./Player";
 import { registerStart } from "./RegisterStart";
 
 
@@ -11,19 +12,38 @@ function start() {
 }
 
 function onUpdate(deltaTime: number) {
-  const playerPositions: Vector3[] = [];
+  const entityPositionsMap = new Map<string, Vector3[]>();
 
-  // What about triggers that only detect specific body parts
-  addToArray(playerPositions, Godot.localPlayer.head.position.get());
-  addToArray(playerPositions, Godot.localPlayer.body.position.get());
-  addToArray(playerPositions, Godot.localPlayer.leftHand.position.get());
-  addToArray(playerPositions, Godot.localPlayer.rightHand.position.get());
-  addToArray(playerPositions, Godot.localPlayer.foot.position.get());
+  entity_Data.triggerDetectableEntities.forEach((id) => {
+    const entity = Entity.getEntityByID(id);
+
+    if (entity) {
+      const tags = entity.tags.get();
+
+      if (tags.length > 0) {
+        const pos = entity.pos;
+
+        entity.tags.get().forEach((tag) => {
+          const array = entityPositionsMap.get(tag) ?? [];
+          entityPositionsMap.set(tag, array);
+
+          array.push(pos);
+        });
+      }
+    }
+  });
+
+  const headPos = Player.head.position.get() ?? Vector3.zero;
+  const bodyPos = Player.body.position.get() ?? Vector3.zero;
+  const leftHandPos = Player.leftHand.position.get() ?? Vector3.zero;
+  const rightHandPos = Player.rightHand.position.get() ?? Vector3.zero;
+  const footPos = Player.foot.position.get() ?? Vector3.zero;
 
   entity_Data.triggerMap.forEach((payload, entityNodeID) => {
     // Current Sphere / Cylinder triggers only work upright
     // Need Cube triggers with directions badly
 
+    // We need the callback function to return the WhatCanTrigger type and the Entity if it is an Entity
 
     // Is this necessary if we make sure that deleting the entity deletes the trigger?
 
@@ -42,9 +62,45 @@ function onUpdate(deltaTime: number) {
       }
 
       let didTrigger = false;
-      const positions: Vector3[] = []
+      const positions: Vector3[] = [];
 
-      playerPositions.forEach((pos) => {
+      const checkPositions: Vector3[] = [];
+
+      if (payload.whatCanTrigger.includes('Body')) {
+        checkPositions.push(bodyPos);
+      }
+
+      if (payload.whatCanTrigger.includes('Entity')) {
+        payload.entityTags.forEach((tag) => {
+          const tagPosArray = entityPositionsMap.get(tag);
+
+          if (tagPosArray) {
+            tagPosArray.forEach((pos) => {
+              if (!checkPositions.includes(pos)) {
+                checkPositions.push(pos);
+              }
+            });
+          }
+        });
+      }
+
+      if (payload.whatCanTrigger.includes('Foot')) {
+        checkPositions.push(footPos);
+      }
+
+      if (payload.whatCanTrigger.includes('Head')) {
+        checkPositions.push(headPos);
+      }
+
+      if (payload.whatCanTrigger.includes('Left Hand')) {
+        checkPositions.push(leftHandPos);
+      }
+
+      if (payload.whatCanTrigger.includes('Right Hand')) {
+        checkPositions.push(rightHandPos);
+      }
+
+      checkPositions.forEach((pos) => {
         let isInTrigger = false;
 
         if (payload.yRadius === undefined) {
@@ -89,11 +145,4 @@ function onUpdate(deltaTime: number) {
       }
     }
   });
-}
-
-
-function addToArray(array: Vector3[], item: { x: number; y: number; z: number; } | undefined) {
-  if (item) {
-    array.push(new Vector3(item.x, item.y, item.z));
-  }
 }
